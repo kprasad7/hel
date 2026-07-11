@@ -15,4 +15,4 @@ COPY workers/common /app/common
 COPY workers/tts/handler.py /app/handler.py
 
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "-u", "handler.py"]
+CMD ["python3", "-u", "handler.py"]

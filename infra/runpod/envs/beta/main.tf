@@ -9,9 +9,10 @@ terraform {
   }
 
   backend "s3" {
-    # Fill in after the AWS tf-state bucket/lock table exist (bootstrap module, or
-    # create by hand once): bucket, key = "runpod/beta/terraform.tfstate", region,
-    # dynamodb_table for locking.
+    bucket         = "vidplatform-tf-state"
+    key            = "runpod/beta/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "vidplatform-tf-lock"
   }
 }
 

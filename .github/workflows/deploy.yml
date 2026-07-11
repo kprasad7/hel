@@ -1,0 +1,151 @@
+name: Deploy
+
+# Manual only — this creates/modifies real, billable AWS + RunPod resources.
+# Chains the two Terraform stacks in the order infra/README.md documents for
+# a manual deploy: AWS first (with placeholder RunPod endpoint IDs, which
+# also creates the Secrets Manager entries), then populate those secrets,
+# then RunPod (which needs the callback secret + the built GHCR images),
+# then re-apply AWS with the real RunPod endpoint IDs it just produced.
+#
+# Each job targets the "production" GitHub Environment — configure required
+# reviewers on it (Settings -> Environments -> production -> protection
+# rules) so applies pause for manual approval instead of running unattended
+# the moment someone clicks "Run workflow".
+on:
+  workflow_dispatch:
+    inputs:
+      apply_aws:
+        description: "Apply infra/aws"
+        type: boolean
+        default: true
+      apply_runpod:
+        description: "Apply infra/runpod"
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-beta
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  aws_bootstrap:
+    if: ${{ inputs.apply_aws }}
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/aws/envs/beta
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+
+      # Placeholder RunPod endpoint IDs here are fine even on repeat runs —
+      # aws_finalize (below) always re-applies with the real ones afterward.
+      - run: |
+          terraform apply -input=false -auto-approve \
+            -var="runpod_video_gen_endpoint_id=placeholder" \
+            -var="runpod_tts_endpoint_id=placeholder" \
+            -var="runpod_bg_audio_endpoint_id=placeholder" \
+            -var="runpod_lip_sync_endpoint_id=placeholder"
+
+      - name: Populate RunPod credential secrets
+        run: |
+          aws secretsmanager put-secret-value --secret-id vidplatform-beta-runpod-api-key \
+            --secret-string "${{ secrets.RUNPOD_API_KEY }}"
+          aws secretsmanager put-secret-value --secret-id vidplatform-beta-callback-shared-secret \
+            --secret-string "${{ secrets.CALLBACK_SHARED_SECRET }}"
+
+  runpod_apply:
+    needs: [aws_bootstrap]
+    # needs.aws_bootstrap is skipped when apply_aws=false; always() lets this
+    # job still run in that case (e.g. you only want to update RunPod images).
+    if: |
+      always() && inputs.apply_runpod &&
+      (needs.aws_bootstrap.result == 'success' || needs.aws_bootstrap.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/runpod/envs/beta
+    outputs:
+      video_gen_endpoint_id: ${{ steps.apply.outputs.video_gen_endpoint_id }}
+      tts_endpoint_id: ${{ steps.apply.outputs.tts_endpoint_id }}
+      bg_audio_endpoint_id: ${{ steps.apply.outputs.bg_audio_endpoint_id }}
+      lip_sync_endpoint_id: ${{ steps.apply.outputs.lip_sync_endpoint_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+
+      - id: apply
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="runpod_api_key=${{ secrets.RUNPOD_API_KEY }}" \
+            -var="callback_shared_secret=${{ secrets.CALLBACK_SHARED_SECRET }}" \
+            -var="video_gen_image=ghcr.io/${{ github.repository_owner }}/hel-video-gen:latest" \
+            -var="tts_image=ghcr.io/${{ github.repository_owner }}/hel-tts:latest" \
+            -var="bg_audio_image=ghcr.io/${{ github.repository_owner }}/hel-bg-audio:latest" \
+            -var="lip_sync_image=ghcr.io/${{ github.repository_owner }}/hel-lip-sync:latest"
+          {
+            echo "video_gen_endpoint_id=$(terraform output -raw video_gen_endpoint_id)"
+            echo "tts_endpoint_id=$(terraform output -raw tts_endpoint_id)"
+            echo "bg_audio_endpoint_id=$(terraform output -raw bg_audio_endpoint_id)"
+            echo "lip_sync_endpoint_id=$(terraform output -raw lip_sync_endpoint_id)"
+          } >> "$GITHUB_OUTPUT"
+
+  aws_finalize:
+    if: ${{ inputs.apply_aws && inputs.apply_runpod }}
+    needs: [runpod_apply]
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: infra/aws/envs/beta
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+
+      - run: |
+          terraform apply -input=false -auto-approve \
+            -var="runpod_video_gen_endpoint_id=${{ needs.runpod_apply.outputs.video_gen_endpoint_id }}" \
+            -var="runpod_tts_endpoint_id=${{ needs.runpod_apply.outputs.tts_endpoint_id }}" \
+            -var="runpod_bg_audio_endpoint_id=${{ needs.runpod_apply.outputs.bg_audio_endpoint_id }}" \
+            -var="runpod_lip_sync_endpoint_id=${{ needs.runpod_apply.outputs.lip_sync_endpoint_id }}"
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API: $(terraform output -raw api_invoke_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- CDN: https://$(terraform output -raw cdn_domain_name)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,78 @@
+name: Terraform Plan
+
+# Plan-only (never applies) against the real AWS account, so PRs show what
+# would actually change. Restricted to PRs from this repo (not forks) since
+# it needs cloud credentials — a fork PR can't read our secrets.
+#
+# Note: this always plans infra/aws with placeholder RunPod endpoint IDs, so
+# once a real deploy has run (see deploy.yml) these plans will show a cosmetic
+# diff on the 4 invoke_* Lambdas' env vars — expected noise, not a real drift
+# signal. Wiring the real endpoint IDs in here would mean persisting them as
+# repo variables and keeping them in sync, which isn't worth the complexity
+# for a single-environment project; skipped deliberately.
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "services/**"
+
+jobs:
+  plan-aws:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws/envs/beta
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - run: terraform init -input=false
+
+      - run: |
+          terraform plan -input=false \
+            -var="runpod_video_gen_endpoint_id=placeholder" \
+            -var="runpod_tts_endpoint_id=placeholder" \
+            -var="runpod_bg_audio_endpoint_id=placeholder" \
+            -var="runpod_lip_sync_endpoint_id=placeholder"
+
+  plan-runpod:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/runpod/envs/beta
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      # Only needed for the S3 state backend — RunPod resources themselves
+      # use the RUNPOD_API_KEY secret via the runpod provider block.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - run: terraform init -input=false
+
+      - run: |
+          terraform plan -input=false \
+            -var="runpod_api_key=${{ secrets.RUNPOD_API_KEY }}" \
+            -var="callback_shared_secret=${{ secrets.CALLBACK_SHARED_SECRET }}" \
+            -var="video_gen_image=ghcr.io/${{ github.repository_owner }}/hel-video-gen:latest" \
+            -var="tts_image=ghcr.io/${{ github.repository_owner }}/hel-tts:latest" \
+            -var="bg_audio_image=ghcr.io/${{ github.repository_owner }}/hel-bg-audio:latest" \
+            -var="lip_sync_image=ghcr.io/${{ github.repository_owner }}/hel-lip-sync:latest"

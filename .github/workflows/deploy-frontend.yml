@@ -1,0 +1,59 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # frontend/config.js in the repo is a REPLACE_ME placeholder template —
+      # this generates the real one from Terraform outputs (never committed)
+      # instead of relying on someone hand-editing it after each deploy.
+      - name: Generate frontend/config.js from Terraform outputs
+        working-directory: infra/aws/envs/beta
+        run: |
+          terraform init -input=false
+          api_url=$(terraform output -raw api_invoke_url)
+          pool_id=$(terraform output -raw cognito_user_pool_id)
+          client_id=$(terraform output -raw cognito_app_client_id)
+          cat > "$GITHUB_WORKSPACE/frontend/config.js" <<EOF
+          window.APP_CONFIG = {
+            API_INVOKE_URL: "${api_url%/}",
+            AWS_REGION: "us-east-1",
+            COGNITO_USER_POOL_ID: "$pool_id",
+            COGNITO_APP_CLIENT_ID: "$client_id",
+          };
+          EOF
+
+      - name: Sync to the ui-static bucket
+        run: |
+          aws s3 sync frontend/ s3://vidplatform-beta-ui-static/ --delete --exclude ".git/*"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          dist_id=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Origins.Items[0].DomainName=='vidplatform-beta-ui-static.s3.us-east-1.amazonaws.com'].Id" \
+            --output text)
+          if [ -n "$dist_id" ]; then
+            aws cloudfront create-invalidation --distribution-id "$dist_id" --paths "/*"
+          else
+            echo "Could not find the CloudFront distribution for the ui-static bucket — skipping invalidation."
+          fi

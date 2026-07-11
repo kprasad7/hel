@@ -1,0 +1,50 @@
+name: CI
+
+# Fast, credential-free checks — safe to run on every push and PR (including
+# from forks). Nothing here touches AWS/RunPod; terraform validate only
+# checks syntax/types, it doesn't call any cloud API.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  terraform-checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [aws, runpod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.0"
+
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive infra/${{ matrix.stack }}
+
+      - name: terraform init (no backend)
+        working-directory: infra/${{ matrix.stack }}/envs/beta
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        working-directory: infra/${{ matrix.stack }}/envs/beta
+        run: terraform validate
+
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile-check all Lambda/worker Python sources
+        run: |
+          set -e
+          files=$(find services workers -name "*.py")
+          echo "$files"
+          python -m py_compile $files

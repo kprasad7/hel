@@ -6,10 +6,9 @@ variable "env" {
   type = string
 }
 
-variable "image_tag" {
+variable "image" {
   type        = string
-  default     = "latest"
-  description = "Tag within this module's own ECR repo. The repo is created by this module; push the built image there before the task is actually run (task definition registration doesn't require the image to exist yet, only RunTask does)."
+  description = "Full image reference the Fargate task pulls, e.g. ghcr.io/org/hel-assembly:latest. Built/pushed by .github/workflows/build-images.yml alongside the RunPod worker images — no ECR needed, ECS can pull public GHCR images directly."
 }
 
 variable "artifacts_bucket_name" {

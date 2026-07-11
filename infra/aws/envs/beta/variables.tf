@@ -44,3 +44,9 @@ variable "grafana_remote_write_user" {
   default     = ""
   description = "Grafana Cloud stack's Prometheus instance ID (Basic Auth username for remote_write)."
 }
+
+variable "assembly_image" {
+  type        = string
+  default     = "ghcr.io/kprasad7/hel-assembly:latest"
+  description = "Full image reference for the Fargate assembly task, pulled directly from GHCR (no ECR involved)."
+}

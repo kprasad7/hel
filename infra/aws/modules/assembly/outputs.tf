@@ -14,10 +14,6 @@ output "security_group_id" {
   value = aws_security_group.assembly.id
 }
 
-output "ecr_repository_url" {
-  value = aws_ecr_repository.assembly.repository_url
-}
-
 output "execution_role_arn" {
   value = aws_iam_role.execution.arn
 }

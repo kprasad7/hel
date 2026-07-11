@@ -53,6 +53,7 @@ module "assembly" {
 
   project = var.project
   env     = var.env
+  image   = var.assembly_image
 
   artifacts_bucket_name   = module.storage.artifacts_bucket_name
   artifacts_bucket_arn    = module.storage.artifacts_bucket_arn

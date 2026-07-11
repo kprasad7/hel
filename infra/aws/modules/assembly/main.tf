@@ -29,11 +29,6 @@ resource "aws_security_group" "assembly" {
   }
 }
 
-resource "aws_ecr_repository" "assembly" {
-  name                 = "${var.project}-${var.env}-assembly"
-  image_tag_mutability = "MUTABLE"
-}
-
 resource "aws_ecs_cluster" "this" {
   name = "${var.project}-${var.env}-assembly"
 }
@@ -100,7 +95,7 @@ resource "aws_ecs_task_definition" "assembly" {
   container_definitions = jsonencode([
     {
       name      = "assembly"
-      image     = "${aws_ecr_repository.assembly.repository_url}:${var.image_tag}"
+      image     = var.image
       essential = true
       # JOB_ID / LIP_SYNC_KEY / BG_AUDIO_KEY / OUTPUT_KEY are supplied per-run
       # via Step Functions ContainerOverrides — only the static config lives here.

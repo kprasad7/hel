@@ -14,10 +14,6 @@ output "state_machine_arn" {
   value = module.orchestration.state_machine_arn
 }
 
-output "assembly_ecr_repository_url" {
-  value = module.assembly.ecr_repository_url
-}
-
 output "cognito_user_pool_id" {
   value = module.auth.user_pool_id
 }

@@ -1,0 +1,7 @@
+runpod>=1.6.0
+kokoro>=0.7.0
+torch==2.3.1
+soundfile>=0.12.1
+numpy>=1.26.0
+pynvml>=11.5.0
+requests>=2.31.0

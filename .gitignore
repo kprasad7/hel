@@ -1,0 +1,22 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfplan
+crash.log
+crash.*.log
+zz_backend_override.tf
+override.tf
+*_override.tf
+
+# Terraform archive_file build outputs (zipped Lambda source, vendored deps)
+**/build/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
+Thumbs.db

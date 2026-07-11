@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Generator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <h1>Video Generator</h1>
+
+    <section id="auth-section">
+      <div id="signin-form" class="card">
+        <h2>Sign in</h2>
+        <input id="signin-email" type="email" placeholder="Email" autocomplete="username" />
+        <input id="signin-password" type="password" placeholder="Password" autocomplete="current-password" />
+        <button id="signin-btn">Sign in</button>
+        <p class="error" id="signin-error"></p>
+        <p class="switch">No account? <a href="#" id="show-signup">Sign up</a></p>
+      </div>
+
+      <div id="signup-form" class="card hidden">
+        <h2>Sign up</h2>
+        <input id="signup-email" type="email" placeholder="Email" autocomplete="username" />
+        <input id="signup-password" type="password" placeholder="Password (min 8 chars)" autocomplete="new-password" />
+        <button id="signup-btn">Sign up</button>
+        <p class="error" id="signup-error"></p>
+        <p class="switch">Already have an account? <a href="#" id="show-signin">Sign in</a></p>
+      </div>
+
+      <div id="confirm-form" class="card hidden">
+        <h2>Confirm your email</h2>
+        <p>Enter the code we emailed you.</p>
+        <input id="confirm-email" type="email" placeholder="Email" />
+        <input id="confirm-code" type="text" placeholder="Confirmation code" />
+        <button id="confirm-btn">Confirm</button>
+        <p class="error" id="confirm-error"></p>
+      </div>
+    </section>
+
+    <section id="app-section" class="hidden">
+      <div class="card">
+        <div class="row">
+          <span id="user-email"></span>
+          <button id="signout-btn" class="link-btn">Sign out</button>
+        </div>
+        <h2>Generate a video</h2>
+        <textarea id="prompt-input" rows="3" placeholder="A corgi surfing a small wave at sunset"></textarea>
+        <button id="submit-btn">Generate</button>
+        <p class="error" id="submit-error"></p>
+      </div>
+
+      <div id="job-card" class="card hidden">
+        <h2>Job <span id="job-id"></span></h2>
+        <p>Status: <span id="job-status"></span></p>
+        <p id="job-stage-note" class="muted"></p>
+        <video id="result-video" class="hidden" controls></video>
+      </div>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

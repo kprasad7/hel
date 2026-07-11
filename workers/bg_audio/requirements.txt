@@ -1,0 +1,8 @@
+runpod>=1.6.0
+torch==2.3.1
+diffusers>=0.30.0
+transformers>=4.42.0
+accelerate>=0.31.0
+soundfile>=0.12.1
+pynvml>=11.5.0
+requests>=2.31.0

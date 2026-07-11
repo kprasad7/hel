@@ -39,4 +39,4 @@ COPY workers/common /app/MuseTalk/common
 COPY workers/lip_sync/handler.py /app/MuseTalk/handler.py
 
 ENV PYTHONUNBUFFERED=1
-CMD ["python3", "-u", "handler.py"]
+CMD ["python3.11", "-u", "handler.py"]

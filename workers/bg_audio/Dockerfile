@@ -11,4 +11,4 @@ COPY workers/common /app/common
 COPY workers/bg_audio/handler.py /app/handler.py
 
 ENV PYTHONUNBUFFERED=1
-CMD ["python3", "-u", "handler.py"]
+CMD ["python3.11", "-u", "handler.py"]

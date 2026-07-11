@@ -119,6 +119,26 @@ generation under profiling, uploads results, always terminates the pod after):
   for ongoing production profiling; `nsys` is available as a manual deep-dive tool if a specific
   model's kernel timeline needs inspection; `ncu` is not usable on RunPod at all, Pod or Serverless.
 
+**Real bug the first automated run masked, found by re-running by hand:** the first
+`gpu-profile-test.yml` run showed every step green with no video produced. Root cause was a classic
+bash footgun — `nsys profile ... python3 run_gen.py | tee log.txt` is a pipeline, and without
+`set -o pipefail` its exit status is `tee`'s (always 0), not the profiled Python process's. A real
+crash inside `run_gen.py` was silently swallowed, and every step downstream "succeeded" at doing
+nothing. Fixed with `set -euo pipefail` plus an explicit `test -f output.mp4` check that fails the
+step outright, and the S3-upload step no longer treats a missing video as a soft warning.
+
+The crash itself was a second, independent, **real production bug**: `workers/video_gen/requirements.txt`
+pinned `torch==2.3.1` against an unpinned `diffusers>=0.30.0`. Current diffusers unconditionally
+imports `torch.nn.attention.flex_attention` (needs torch>=2.5) and references `torch.xpu` (needs
+torch>=2.4) at import time — both raise immediately on torch 2.3.1, meaning the real deployed
+`video_gen` worker would have failed on every single invocation. Also missing: `protobuf`, needed
+by the T5 tokenizer's sentencepiece→tiktoken fallback conversion. Both fixed in requirements.txt
+(torch>=2.5.1, diffusers>=0.31.0, added protobuf) and verified end-to-end by hand on a fresh A100
+Pod: **model load 43.29s** (first-run HF download, not representative of a warm/cached worker),
+**generation 24.01s** for a 121-frame 768×512 clip at the diffusers default of 50 inference steps —
+slightly over the 20s target. Reducing inference steps is the lever to pull if hitting 20s matters;
+not yet tuned.
+
 ## Conventions
 
 - Every RunPod worker is a self-contained Docker image (one model per image) — swapping a model

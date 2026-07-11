@@ -117,7 +117,17 @@ jobs:
             dpkg -i cuda-keyring_1.1-1_all.deb
             apt-get update -qq
             apt-get install -y -qq datacenter-gpu-manager nsight-systems-2025.3.2 nsight-compute-2025.3.1 2>&1 | tail -10
-            pip install -q --no-input diffusers transformers accelerate "imageio[ffmpeg]" sentencepiece pynvml requests
+
+            # The runpod/pytorch base image bundles torchaudio/torchvision
+            # compiled against its stock torch 2.1.0 — remove them before
+            # installing our requirements (which upgrade torch), or the
+            # mismatched ABI breaks the diffusers import chain with an
+            # undefined-symbol error (found by hand, see
+            # workers/video_gen/requirements.txt for the full story).
+            pip uninstall -y -q torchaudio torchvision
+            pip install -q --no-input -r /workspace/video_gen/requirements.txt
+            python3 -c "from diffusers import LTXPipeline" || (echo "LTXPipeline import still broken after install — aborting" && exit 1)
+
             nv-hostengine
             echo "TOOLS_READY"
           '
@@ -155,9 +165,30 @@ jobs:
           print(f"LOAD_S={load_s:.2f} GEN_S={gen_s:.2f}")
           PYEOF
 
+          # A cheap synthetic GPU workload for the Nsight Compute permission
+          # check — ncu is already proven blocked on RunPod (ERR_NVGPUCTRPERM,
+          # see CLAUDE.md), so re-running the full, expensive video generation
+          # a second time just to watch it fail again would waste real pod
+          # time/cost for no new information. This confirms the same result
+          # on whichever pod this run happens to land on, in a few seconds.
+          cat > /tmp/gpu_smoke.py <<'PYEOF'
+          import torch
+          x = torch.randn(4096, 4096, device="cuda")
+          y = torch.randn(4096, 4096, device="cuda")
+          for _ in range(20):
+              z = x @ y
+          torch.cuda.synchronize()
+          print("done")
+          PYEOF
+
           cat > /tmp/remote_run.sh <<'SHEOF'
           #!/bin/bash
-          set -x
+          # pipefail is the whole point here: without it, `cmd | tee log`
+          # exits with tee's status (almost always 0) even if cmd crashed,
+          # which silently masked a real failure the first time this workflow
+          # ran — every downstream step showed green with no video ever
+          # produced. See CLAUDE.md for the full story.
+          set -euo pipefail
           PROMPT="$1"
 
           nohup dcgmi dmon -e 203,204,150,155 -d 1000 > /tmp/dcgm.log 2>&1 &
@@ -168,8 +199,10 @@ jobs:
 
           kill "$dcgm_pid" 2>/dev/null || true
 
+          test -f /tmp/output.mp4 || (echo "output.mp4 missing after generation — treating as failure" >&2 && exit 1)
+
           NCU=$(find /opt/nvidia/nsight-compute -maxdepth 2 -name ncu -type f | head -1)
-          "$NCU" --target-processes all -o /tmp/ncu_report python3 /tmp/run_gen.py "$PROMPT" \
+          "$NCU" --target-processes all -o /tmp/ncu_report python3 /tmp/gpu_smoke.py \
             > /tmp/ncu.log 2>&1 || true
           SHEOF
 
@@ -177,7 +210,7 @@ jobs:
         id: run_test
         run: |
           ip="${{ steps.pod_conn.outputs.ip }}"; port="${{ steps.pod_conn.outputs.port }}"
-          scp -o StrictHostKeyChecking=no -i /tmp/podkey -P "$port" /tmp/run_gen.py /tmp/remote_run.sh root@"$ip":/tmp/
+          scp -o StrictHostKeyChecking=no -i /tmp/podkey -P "$port" /tmp/run_gen.py /tmp/gpu_smoke.py /tmp/remote_run.sh root@"$ip":/tmp/
           ssh -o StrictHostKeyChecking=no -i /tmp/podkey -p "$port" root@"$ip" \
             "chmod +x /tmp/remote_run.sh && /tmp/remote_run.sh '${{ inputs.prompt }}'"
 
@@ -203,7 +236,13 @@ jobs:
             aws s3 cp results/output.mp4 "s3://vidplatform-beta-jobs-artifacts/gpu-profile-tests/${{ github.run_id }}/output.mp4"
             echo "Uploaded to s3://vidplatform-beta-jobs-artifacts/gpu-profile-tests/${{ github.run_id }}/output.mp4"
           else
-            echo "No output.mp4 produced — generation likely failed, see logs."
+            # Belt-and-suspenders: run_test's own `set -o pipefail` + explicit
+            # `test -f output.mp4` check should already have failed the job
+            # before this step runs. Failing here too in case output.mp4 is
+            # missing for some other reason (partial scp, etc.) — a missing
+            # video must never look like a successful run.
+            echo "::error::No output.mp4 produced — generation failed, see the run_test step logs."
+            exit 1
           fi
 
       - name: Upload all profiling data as workflow artifacts

@@ -89,12 +89,35 @@ Update this section as stages land.
       API Gateway throttling (stage-level `default_route_settings`, already part of `api_gateway` module)
 - [x] Frontend UI: vanilla HTML/CSS/JS (no build step), Cognito sign-up/confirm/sign-in, prompt
       submit, status polling, video playback. Served via CloudFront + a private (OAC-only) S3 bucket.
+- [x] Repo is live at github.com/kprasad7/hel. Full CI/CD in `.github/workflows/`: `ci.yml` (fast
+      validation, no creds), `build-images.yml` (all 5 worker images → GHCR, `:latest` + `:<sha>`),
+      `terraform-plan.yml` (PR plans), `deploy.yml` (orchestrated manual deploy chaining
+      aws→runpod→aws), `deploy-frontend.yml`, `gpu-profile-test.yml` (see below).
+- [x] **Real infra deployed** to AWS account 603533984507 (`terraform apply`, 78 resources) and all
+      5 worker images built/pushed to `ghcr.io/kprasad7/hel-*`. RunPod-side apply (creating the
+      actual GPU endpoints) is triggered via the `deploy.yml` GitHub Actions workflow, not run
+      locally — check the repo's Actions tab for current deploy status rather than assuming this
+      doc is current on that point.
 
-`terraform validate` and a real `terraform plan` (against the actual AWS account, and the real
-RunPod provider registry) both pass clean for the full stack — **not yet `terraform apply`'d**
-(costs money / creates real resources; needs an explicit go-ahead plus a RunPod API key and
-built/pushed worker + assembly images, see `infra/README.md`). That real deploy + end-to-end smoke
-test is the natural next step once the user is ready to spend.
+## GPU Profiling Findings (empirical, from `gpu-profile-test.yml`)
+
+Verified by hand on a real RunPod A100 Pod before building the workflow, then codified into
+`.github/workflows/gpu-profile-test.yml` (manual-dispatch: rents a Pod, runs one video_gen
+generation under profiling, uploads results, always terminates the pod after):
+
+- **Nsight Compute (`ncu`) is blocked on RunPod** — fails with `ERR_NVGPUCTRPERM`. Root cause:
+  reading GPU hardware performance counters requires `CAP_SYS_ADMIN` or `CAP_PERFMON`, and RunPod
+  Pod containers explicitly exclude both from the capability set (confirmed via `capsh --print`,
+  even as root over SSH) — this is a host-level driver restriction
+  (`NVreg_RestrictProfilingToAdminUsers`), not something fixable from inside the container. Applies
+  to Pods; RunPod Serverless is presumed at least as restrictive (not separately tested).
+- **Nsight Systems (`nsys`) works fine** — no elevated permissions needed, since it traces CUDA
+  API/kernel-launch timing via CUPTI's activity API rather than reading hardware perf counters.
+- **DCGM works fine** — `dcgmi discovery`/`dmon` are NVML-based, same permission tier as our
+  existing `pynvml` profiling in `workers/common/profiling.py`.
+- Practical takeaway: stick with the pynvml-based utilization/memory/power sampling already built
+  for ongoing production profiling; `nsys` is available as a manual deep-dive tool if a specific
+  model's kernel timeline needs inspection; `ncu` is not usable on RunPod at all, Pod or Serverless.
 
 ## Conventions
 

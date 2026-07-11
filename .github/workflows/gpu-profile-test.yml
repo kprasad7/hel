@@ -1,0 +1,251 @@
+name: GPU Profile Test
+
+# Manual only — rents a real RunPod A100 Pod by the hour. Spins it up, runs
+# one video_gen generation wrapped in DCGM monitoring + Nsight Systems (and
+# attempts Nsight Compute, which is expected to fail — see below), uploads
+# the generated video to S3 and all profiling data as workflow artifacts,
+# then ALWAYS terminates the pod (even on failure/timeout) so nothing keeps
+# billing after the run.
+#
+# Nsight Compute (ncu) needs the NVIDIA driver's deep hardware performance
+# counters, gated behind CAP_SYS_ADMIN/CAP_PERFMON. RunPod Pods don't grant
+# either capability to tenant containers (verified by hand before this
+# workflow existed — see CLAUDE.md), so the ncu step is expected to fail
+# with ERR_NVGPUCTRPERM. It still runs and its output is captured as a
+# documented, expected result rather than skipped — Nsight Systems and DCGM
+# are the tools that actually produce usable data here.
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Video generation prompt (avoid quote characters — passed through several shell layers)"
+        type: string
+        default: "a corgi surfing a small wave at sunset"
+      gpu_type:
+        description: "RunPod GPU type"
+        type: string
+        default: "NVIDIA A100 80GB PCIe"
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Generate ephemeral SSH keypair
+        run: ssh-keygen -t ed25519 -f /tmp/podkey -N "" -C "gpu-profile-test-ci"
+
+      - name: Create RunPod Pod
+        id: create_pod
+        run: |
+          pubkey=$(cat /tmp/podkey.pub)
+          cat > /tmp/pod_create_body.json <<EOF
+          {
+            "name": "gpu-profile-test-${{ github.run_id }}",
+            "imageName": "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04",
+            "gpuTypeIds": ["${{ inputs.gpu_type }}", "NVIDIA A100-SXM4-80GB", "NVIDIA A100 80GB PCIe"],
+            "gpuCount": 1,
+            "containerDiskInGb": 50,
+            "volumeInGb": 0,
+            "ports": ["22/tcp"],
+            "cloudType": "SECURE",
+            "interruptible": false,
+            "env": {"PUBLIC_KEY": "$pubkey"}
+          }
+          EOF
+          resp=$(curl -s -X POST "https://rest.runpod.io/v1/pods" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/pod_create_body.json)
+          echo "$resp"
+          pod_id=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "pod_id=$pod_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for public IP + SSH port
+        id: pod_conn
+        run: |
+          pod_id="${{ steps.create_pod.outputs.pod_id }}"
+          for i in $(seq 1 30); do
+            resp=$(curl -s "https://rest.runpod.io/v1/pods/$pod_id" -H "Authorization: Bearer $RUNPOD_API_KEY")
+            ip=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('publicIp',''))")
+            port=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('portMappings',{}).get('22',''))")
+            if [ -n "$ip" ] && [ -n "$port" ]; then
+              echo "ip=$ip" >> "$GITHUB_OUTPUT"
+              echo "port=$port" >> "$GITHUB_OUTPUT"
+              echo "Got connection: $ip:$port"
+              break
+            fi
+            sleep 10
+          done
+
+      - name: Wait for SSH to accept connections
+        run: |
+          ip="${{ steps.pod_conn.outputs.ip }}"
+          port="${{ steps.pod_conn.outputs.port }}"
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+                 -i /tmp/podkey -p "$port" root@"$ip" "echo SSH_OK"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "SSH never became available"; exit 1
+
+      - name: Copy worker code to pod
+        run: |
+          scp -o StrictHostKeyChecking=no -i /tmp/podkey -P "${{ steps.pod_conn.outputs.port }}" -r \
+            workers/video_gen workers/common \
+            root@"${{ steps.pod_conn.outputs.ip }}":/workspace/
+
+      - name: Install profiling tools + model dependencies on pod
+        run: |
+          ip="${{ steps.pod_conn.outputs.ip }}"; port="${{ steps.pod_conn.outputs.port }}"
+          ssh -o StrictHostKeyChecking=no -i /tmp/podkey -p "$port" root@"$ip" '
+            set -e
+            apt-get update -qq
+            apt-get install -y -qq wget gnupg ca-certificates > /dev/null 2>&1
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+            dpkg -i cuda-keyring_1.1-1_all.deb
+            apt-get update -qq
+            apt-get install -y -qq datacenter-gpu-manager nsight-systems-2025.3.2 nsight-compute-2025.3.1 2>&1 | tail -10
+            pip install -q --no-input diffusers transformers accelerate "imageio[ffmpeg]" sentencepiece pynvml requests
+            nv-hostengine
+            echo "TOOLS_READY"
+          '
+
+      # The generation script and the remote driver script are both written
+      # to files with quoted heredoc delimiters ('PYEOF'/'SHEOF') so nothing
+      # inside them is expanded locally, then scp'd over and run remotely
+      # with the prompt passed as a real argument ($1) — deliberately
+      # avoiding embedding the prompt text inside a multi-layer-quoted
+      # inline SSH command, which is fragile if the prompt ever contains a
+      # quote character.
+      - name: Prepare remote scripts
+        run: |
+          cat > /tmp/run_gen.py <<'PYEOF'
+          import json, os, sys, time
+          sys.path.insert(0, "/workspace/video_gen")
+          sys.path.insert(0, "/workspace")
+          os.environ.setdefault("MODEL_ID", "Lightricks/LTX-Video")
+
+          start_load = time.perf_counter()
+          from diffusers import LTXPipeline
+          import torch
+          pipe = LTXPipeline.from_pretrained(os.environ["MODEL_ID"], torch_dtype=torch.bfloat16)
+          pipe.to("cuda")
+          load_s = time.perf_counter() - start_load
+
+          start_gen = time.perf_counter()
+          frames = pipe(prompt=sys.argv[1], width=768, height=512, num_frames=121).frames[0]
+          gen_s = time.perf_counter() - start_gen
+
+          from diffusers.utils import export_to_video
+          export_to_video(frames, "/tmp/output.mp4", fps=24)
+
+          json.dump({"model_load_s": load_s, "generation_s": gen_s}, open("/tmp/timing.json", "w"))
+          print(f"LOAD_S={load_s:.2f} GEN_S={gen_s:.2f}")
+          PYEOF
+
+          cat > /tmp/remote_run.sh <<'SHEOF'
+          #!/bin/bash
+          set -x
+          PROMPT="$1"
+
+          nohup dcgmi dmon -e 203,204,150,155 -d 1000 > /tmp/dcgm.log 2>&1 &
+          dcgm_pid=$!
+
+          nsys profile -o /tmp/nsys_report --force-overwrite=true \
+            python3 /tmp/run_gen.py "$PROMPT" 2>&1 | tee /tmp/nsys_run.log
+
+          kill "$dcgm_pid" 2>/dev/null || true
+
+          NCU=$(find /opt/nvidia/nsight-compute -maxdepth 2 -name ncu -type f | head -1)
+          "$NCU" --target-processes all -o /tmp/ncu_report python3 /tmp/run_gen.py "$PROMPT" \
+            > /tmp/ncu.log 2>&1 || true
+          SHEOF
+
+      - name: Run video generation under DCGM + Nsight Systems (+ Nsight Compute attempt)
+        id: run_test
+        run: |
+          ip="${{ steps.pod_conn.outputs.ip }}"; port="${{ steps.pod_conn.outputs.port }}"
+          scp -o StrictHostKeyChecking=no -i /tmp/podkey -P "$port" /tmp/run_gen.py /tmp/remote_run.sh root@"$ip":/tmp/
+          ssh -o StrictHostKeyChecking=no -i /tmp/podkey -p "$port" root@"$ip" \
+            "chmod +x /tmp/remote_run.sh && /tmp/remote_run.sh '${{ inputs.prompt }}'"
+
+      - name: Fetch results from pod
+        if: always()
+        run: |
+          ip="${{ steps.pod_conn.outputs.ip }}"; port="${{ steps.pod_conn.outputs.port }}"
+          mkdir -p results
+          scp -o StrictHostKeyChecking=no -i /tmp/podkey -P "$port" \
+            root@"$ip":/tmp/output.mp4 \
+            root@"$ip":/tmp/timing.json \
+            root@"$ip":/tmp/dcgm.log \
+            root@"$ip":/tmp/nsys_run.log \
+            root@"$ip":"/tmp/nsys_report.nsys-rep" \
+            root@"$ip":/tmp/ncu.log \
+            results/ 2>&1 || echo "some files may be missing, continuing"
+          ls -la results/
+
+      - name: Upload generated video to S3
+        if: always()
+        run: |
+          if [ -f results/output.mp4 ]; then
+            aws s3 cp results/output.mp4 "s3://vidplatform-beta-jobs-artifacts/gpu-profile-tests/${{ github.run_id }}/output.mp4"
+            echo "Uploaded to s3://vidplatform-beta-jobs-artifacts/gpu-profile-tests/${{ github.run_id }}/output.mp4"
+          else
+            echo "No output.mp4 produced — generation likely failed, see logs."
+          fi
+
+      - name: Upload all profiling data as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-profile-results-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "### GPU Profile Test Results" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f results/timing.json ]; then
+            python3 -c "
+          import json
+          t = json.load(open('results/timing.json'))
+          print(f\"- Model load: {t['model_load_s']:.2f}s\")
+          print(f\"- Generation: {t['generation_s']:.2f}s\")
+          print(f\"- **Within 20s target: {'YES' if t['generation_s'] <= 20 else 'NO'}**\")
+          " >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- No timing data — generation step failed, check logs above." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- DCGM log: see workflow artifact (dcgm.log)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Nsight Systems report: see workflow artifact (nsys_report.nsys-rep — open in Nsight Systems GUI)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f results/ncu.log ]; then
+            if grep -q ERR_NVGPUCTRPERM results/ncu.log; then
+              echo "- Nsight Compute: blocked (ERR_NVGPUCTRPERM) — expected, RunPod Pods don't grant the required capability." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- Nsight Compute: see workflow artifact (ncu.log / ncu_report) — did NOT hit the expected permission error, worth a look." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      # Runs even if earlier steps failed or the job timed out — never leave
+      # a billing Pod running because a step above errored out.
+      - name: Terminate the Pod
+        if: always()
+        run: |
+          pod_id="${{ steps.create_pod.outputs.pod_id }}"
+          if [ -n "$pod_id" ]; then
+            curl -s -X DELETE "https://rest.runpod.io/v1/pods/$pod_id" \
+              -H "Authorization: Bearer $RUNPOD_API_KEY" -w "\nHTTP_STATUS:%{http_code}\n"
+          fi

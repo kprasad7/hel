@@ -36,6 +36,10 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
+      - name: Build runpod_callback Lambda package
+        working-directory: .
+        run: bash scripts/build_runpod_callback.sh
+
       - run: terraform init -input=false
 
       - run: |

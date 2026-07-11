@@ -162,45 +162,16 @@ resource "aws_lambda_permission" "get_job_apigw" {
 # Unlike the other Lambdas here, this one has a real third-party dependency
 # (cramjam, for Snappy compression of the Prometheus remote_write payload —
 # see services/common/remote_write.py), so it can't just be zipped from raw
-# .py files like the rest. A local-exec step vendors the dependency into a
-# build dir (as manylinux wheels, matching the Lambda runtime) before zipping.
-# Requires `pip` and `bash` on the machine running `terraform apply`.
-locals {
-  runpod_callback_src_dir = "${path.module}/build/runpod_callback_src"
-}
-
-resource "null_resource" "runpod_callback_deps" {
-  triggers = {
-    requirements_hash = filemd5("${var.services_dir}/runpod_callback/requirements.txt")
-    handler_hash      = filemd5("${var.services_dir}/runpod_callback/handler.py")
-    remote_write_hash = filemd5("${var.services_dir}/common/remote_write.py")
-    dynamo_hash       = filemd5("${var.services_dir}/common/dynamo.py")
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = <<-EOT
-      set -euo pipefail
-      rm -rf "${local.runpod_callback_src_dir}"
-      mkdir -p "${local.runpod_callback_src_dir}/common"
-      cp "${var.services_dir}/runpod_callback/handler.py" "${local.runpod_callback_src_dir}/handler.py"
-      cp "${var.services_dir}/common/dynamo.py" "${local.runpod_callback_src_dir}/common/dynamo.py"
-      cp "${var.services_dir}/common/models.py" "${local.runpod_callback_src_dir}/common/models.py"
-      cp "${var.services_dir}/common/remote_write.py" "${local.runpod_callback_src_dir}/common/remote_write.py"
-      : > "${local.runpod_callback_src_dir}/common/__init__.py"
-      pip install --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
-        --only-binary=:all: --target "${local.runpod_callback_src_dir}" \
-        -r "${var.services_dir}/runpod_callback/requirements.txt"
-    EOT
-  }
-}
-
+# .py files like the rest. scripts/build_runpod_callback.sh vendors it into
+# services/runpod_callback/build BEFORE terraform runs — Terraform just zips
+# whatever's there, it doesn't build it. (A null_resource + local-exec
+# approach was tried first and broke the moment Terraform state moved to a
+# different machine — e.g. a CI runner — since local-exec's disk side
+# effects aren't tracked by Terraform state across machines. Don't reintroduce it.)
 data "archive_file" "runpod_callback" {
   type        = "zip"
   output_path = "${path.module}/build/runpod_callback.zip"
-  source_dir  = local.runpod_callback_src_dir
-
-  depends_on = [null_resource.runpod_callback_deps]
+  source_dir  = "${var.services_dir}/runpod_callback/build"
 }
 
 resource "aws_iam_role" "runpod_callback" {

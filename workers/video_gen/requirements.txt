@@ -1,11 +1,20 @@
-runpod>=1.6.0
 # torch==2.3.1 was the original pin but is broken with current diffusers:
 # diffusers unconditionally imports torch.nn.attention.flex_attention (needs
 # torch>=2.5) and torch.xpu (needs torch>=2.4) at import time, regardless of
-# whether those code paths are used. Verified working combo (torch 2.5.1 +
-# latest diffusers) by hand on a real RunPod A100 Pod on 2026-07-11 — bumped
-# the floor here, not just this one pin, since it's the actual root cause.
-torch>=2.5.1
+# whether those code paths are used.
+#
+# Pinned exactly (not >=) after a second real failure: an earlier `torch>=2.5.1`
+# floor let pip grab whichever torch is newest on a given day, and "newest"
+# defaults to a CUDA-build variant with a higher minimum driver requirement
+# than every RunPod machine has — one A100 Pod worked, a different one failed
+# with "The NVIDIA driver on your system is too old (found version 12070)".
+# Exact-pinning + explicitly targeting the cu118 wheel build (lowest driver
+# floor, same pattern already used in workers/lip_sync/Dockerfile) avoids
+# both failure modes reproducibly. Verified working end-to-end on RunPod A100
+# Pods on 2026-07-11/12.
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.5.1
+runpod>=1.6.0
 diffusers>=0.31.0
 transformers>=4.42.0
 accelerate>=0.31.0
